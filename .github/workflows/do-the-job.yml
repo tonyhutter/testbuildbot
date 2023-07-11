@@ -1,0 +1,102 @@
+name: do-the-job
+on: pull_request
+jobs:
+  start-runner:
+    name: Start self-hosted EC2 runner
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-ec2-runner.outputs.label }}
+      ec2-instance-id: ${{ steps.start-ec2-runner.outputs.ec2-instance-id }}
+    permissions:
+      # Next two lines from:
+      # https://github.com/aws-actions/configure-aws-credentials/issues/271
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::527982855112:role/ec2-runner-role
+          aws-region: us-west-1
+      - name: Start EC2 runner
+        id: start-ec2-runner
+        uses: tonyhutter/ec2-github-runner@block-device-mapping
+        with:
+          mode: start
+          github-token: ${{ secrets.EC2_RUNNER_GH_TOKEN }}
+          ec2-image-id: ami-07bdb09c49774f92e
+
+          # alma9
+          # ec2-image-id: ami-04d38a39603d0b9c9
+
+          ec2-instance-type: t3.large
+          subnet-id: subnet-0ee4ee0ef486fab9b
+          security-group-id: sg-08b62eeae40ac1555
+          key-name: buildbot-keypair
+          block-device-mapping: |
+            [
+            {"DeviceName" : "/dev/sda1", "Ebs" : { "VolumeType": "gp2", "VolumeSize": 34 }},
+            {"DeviceName" : "/dev/sdb", "VirtualName": "ephemeral0" },
+            {"DeviceName" : "/dev/sdc", "VirtualName": "ephemeral1" },
+            {"DeviceName" : "/dev/sdd", "VirtualName": "ephemeral2" },
+            {"DeviceName" : "/dev/sde", "VirtualName": "ephemeral3" },
+            {"DeviceName" : "/dev/sdf", "VirtualName": "ephemeral4" },
+            {"DeviceName" : "/dev/sdg", "VirtualName": "ephemeral5" }
+            ]
+
+          # Note, we have to install compat-openssl11 due to .NET bugs with
+          # OpenSSL 3
+          # https://omairmajid.com/posts/2021-08-25-using-.net-in-centos-stream-9/
+          # https://github.com/actions/runner/issues/1902
+          # https://github.com/dotnet/sdk/issues/25582
+          # https://techcommunity.microsoft.com/t5/system-center-blog/announcement-adding-support-for-latest-linux-os-ubuntu-22-04-amp/bc-p/3777763/highlight/true#M3698
+          pre-runner-script: |
+             sudo yum install docker git libicu -y || true
+
+  do-the-job:
+    name: Do the job on the runner
+    needs: start-runner # required to start the main job when the runner is ready
+    runs-on: ${{ needs.start-runner.outputs.label }} # run the job on the newly created runner
+    steps:
+      - name: Hello World
+        run: |
+            echo "Hello World! $(cat /etc/*-release) $(df -h)"
+            echo "test test" > stuff.txt
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: the_stuff
+          path: stuff.txt
+
+  stop-runner:
+    name: Stop self-hosted EC2 runner
+    needs:
+      - start-runner # required to get output from the start-runner job
+      - do-the-job # required to wait when the main job is done
+    runs-on: ubuntu-latest
+    if: ${{ always() }} # required to stop the runner even if the error happened in the previous jobs
+    permissions:
+      # Next two lines from:
+      # https://github.com/aws-actions/configure-aws-credentials/issues/271
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::527982855112:role/ec2-runner-role
+          aws-region: us-west-1
+      - name: Stop EC2 runner
+#        uses: ./.github/workflows/ec2-github-runner/
+        uses: tonyhutter/ec2-github-runner@block-device-mapping
+        with:
+          mode: stop
+          github-token: ${{ secrets.EC2_RUNNER_GH_TOKEN }}
+          label: ${{ needs.start-runner.outputs.label }}
+          ec2-instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}
+#          save-console-file: console.txt
+      - name: Upload console logs
+        uses: actions/upload-artifact@v3
+        with:
+          name: archive_of_output_files
+          path: console.txt
